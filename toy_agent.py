@@ -1,8 +1,9 @@
 import asyncio
 import json
 import os
-from typing import Literal, List, TypedDict, Annotated, Optional, Tuple, Union
+from typing import Literal, List, TypedDict, Annotated, Optional, Tuple, Union, Protocol, Any
 from uuid import uuid4
+from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
@@ -16,30 +17,40 @@ from langchain_core.messages import ToolMessage, AIMessage, BaseMessage
 # --- 0. Mocks & Setup ---
 load_dotenv()
 
-# Mock Data Store (The "Canvas")
-CANVAS_DB = {
-    "nodes": [],
-    "edges": []
-}
+# --- 1. Repository & Data Models ---
 
-def render_canvas():
-    """Helper to visualize the graph in ASCII"""
-    print("\n" + "="*40)
-    print("      CURRENT CANVAS STATE      ")
-    print("="*40)
-    if not CANVAS_DB["nodes"]:
-        print("(Empty)")
-    else:
-        print(f"Nodes ({len(CANVAS_DB['nodes'])}):")
-        for n in CANVAS_DB["nodes"]:
-            print(f"  [{n['type'].upper()}] {n['label']} (ID: {n['id'][:4]}..)")
-        
-        print(f"\nEdges ({len(CANVAS_DB['edges'])}):")
-        for e in CANVAS_DB["edges"]:
-            print(f"  {e['source'][:4]}.. --> {e['target'][:4]}..")
-    print("="*40 + "\n")
+class CanvasRepository(Protocol):
+    def get_state(self) -> dict:
+        ...
+    
+    def add_node(self, node: dict) -> None:
+        ...
+    
+    def add_edge(self, edge: dict) -> None:
+        ...
 
-# --- 1. Data Models ---
+@dataclass
+class InMemoryCanvas:
+    nodes: List[dict] = field(default_factory=list)
+    edges: List[dict] = field(default_factory=list)
+
+    def get_state(self) -> dict:
+        return {
+            "nodes": self.nodes,
+            "edges": self.edges
+        }
+
+    def add_node(self, node: dict) -> None:
+        self.nodes.append(node)
+
+    def add_edge(self, edge: dict) -> None:
+        self.edges.append(edge)
+
+@dataclass
+class AgentDeps:
+    canvas: CanvasRepository
+
+# --- 2. Shared Models ---
 
 class Plan(BaseModel):
     """The plan of action."""
@@ -56,27 +67,59 @@ class PlanExecuteState(TypedDict):
     response: Optional[str]
     # For the internal executor agent:
     executor_messages: Annotated[List[BaseMessage], add_messages] 
+    # Logic: referencing an object ID or similar could be better, 
+    # but for this toy example we will assume 'deps' are injected at runtime via config
+    # or just accessible via scope if we keep it simple. 
+    # BETTER: generic "deps" or "context" key isn't standard in typeddict unless we put it there.
+    # We will pass the 'canvas' instance via the 'configurable' config in LangGraph.
 
-# --- 2. The Tools (Native PydanticAI) ---
+class RePlan(BaseModel):
+    """The updated plan or final response."""
+    response: Optional[str] = Field(description="Final answer to user if done.")
+    plan: Optional[List[str]] = Field(description="New sequential list of remaining steps.")
 
-# Define the Executor Agent globally so we can register tools
+
+# --- 3. The Agents ---
+
+# -- Planner Agent --
+planner_agent = Agent(
+    'openai:gpt-4o',
+    deps_type=AgentDeps,
+    output_type=Plan,
+)
+
+@planner_agent.system_prompt
+def planner_system_prompt(ctx: RunContext[AgentDeps]) -> str:
+    canvas_state = json.dumps(ctx.deps.canvas.get_state())
+    return (
+        "You are a Graph Construction Planner."
+        f"\nCurrent Canvas: {canvas_state}"
+        "\nYour job is to break down the user's request into a strict sequence of steps."
+        "\nThe available tools for execution are:"
+        "\n- add_node(type, label)"
+        "\n- connect_nodes(source_label, target_label)"
+        "\nBe explicit about node labels and types."
+        "\nIMPORTANT: Check the Current Canvas. If a requested node already exists, do not plan to add it."
+    )
+
+# -- Executor Agent --
 executor_agent = Agent(
     'openai:gpt-4o',
-    deps_type=RunContext,
+    deps_type=AgentDeps,
 )
 
 @executor_agent.system_prompt
-def block_executor_system_prompt(ctx: RunContext) -> str:
+def executor_system_prompt(ctx: RunContext[AgentDeps]) -> str:
+    canvas_state = json.dumps(ctx.deps.canvas.get_state())
     return (
         "You are a Graph Tool Executor."
-        f"\nCurrent Canvas: {json.dumps(CANVAS_DB)}" 
+        f"\nCurrent Canvas: {canvas_state}" 
         "\nYour goal is to execute the given task using the available tools."
         "\nIf you cannot perform the action, explain why."
     )
 
-# We use the deps_type=None default for now, purely functional tools
 @executor_agent.tool
-def tool_add_node(ctx: RunContext, type: str, label: str) -> str:
+def tool_add_node(ctx: RunContext[AgentDeps], type: str, label: str) -> str:
     """
     Add a new node to the graph.
     
@@ -86,11 +129,11 @@ def tool_add_node(ctx: RunContext, type: str, label: str) -> str:
     """
     new_id = str(uuid4())
     node = {"id": new_id, "type": type, "label": label}
-    CANVAS_DB["nodes"].append(node)
+    ctx.deps.canvas.add_node(node)
     return json.dumps({"status": "success", "msg": f"Added node '{label}'", "id": new_id})
 
 @executor_agent.tool
-def tool_connect_nodes(ctx: RunContext, source_label: str, target_label: str) -> str:
+def tool_connect_nodes(ctx: RunContext[AgentDeps], source_label: str, target_label: str) -> str:
     """
     Connect two existing nodes by their labels.
     
@@ -98,9 +141,12 @@ def tool_connect_nodes(ctx: RunContext, source_label: str, target_label: str) ->
         source_label: The label of the starting node.
         target_label: The label of the destination node.
     """
+    state_snap = ctx.deps.canvas.get_state()
+    nodes = state_snap["nodes"]
+    
     # Helper to find IDs by label
-    s_node = next((n for n in CANVAS_DB["nodes"] if n['label'].lower() == source_label.lower()), None)
-    t_node = next((n for n in CANVAS_DB["nodes"] if n['label'].lower() == target_label.lower()), None)
+    s_node = next((n for n in nodes if n['label'].lower() == source_label.lower()), None)
+    t_node = next((n for n in nodes if n['label'].lower() == target_label.lower()), None)
     
     if not s_node:
         return f"Error: Source node '{source_label}' not found."
@@ -108,121 +154,133 @@ def tool_connect_nodes(ctx: RunContext, source_label: str, target_label: str) ->
         return f"Error: Target node '{target_label}' not found."
     
     edge = {"source": s_node['id'], "target": t_node['id']}
-    CANVAS_DB["edges"].append(edge)
+    ctx.deps.canvas.add_edge(edge)
     return json.dumps({"status": "success", "msg": f"Connected {source_label} to {target_label}"})
 
+# -- Replanner Agent --
+replanner_agent = Agent(
+    'openai:gpt-4o',
+    deps_type=AgentDeps,
+    output_type=RePlan,
+)
 
-# --- 3. Node A: The Planner ---
-
-async def planner_node(state: PlanExecuteState):
-    print("  ... [Planner] Creating plan ...")
-    agent = Agent(
-        'openai:gpt-4o',
-        output_type=Plan,
-        system_prompt=(
-            "You are a Graph Construction Planner."
-            f"\nCurrent Canvas: {json.dumps(CANVAS_DB)}"
-            "\nYour job is to break down the user's request into a strict sequence of steps."
-            "\nThe available tools for execution are:"
-            "\n- add_node(type, label)"
-            "\n- connect_nodes(source_label, target_label)"
-            "\nBe explicit about node labels and types."
-            "\nIMPORTANT: Check the Current Canvas. If a requested node already exists, do not plan to add it."
-        )
+@replanner_agent.system_prompt
+def replanner_system_prompt(ctx: RunContext[AgentDeps]) -> str:
+    canvas_state = json.dumps(ctx.deps.canvas.get_state())
+    return (
+        "You are a Replanner."
+        f"\nCurrent Canvas: {canvas_state}"
+        "\nReview the original goal, the steps completed so far, and the result of the last step."
+        "\nCheck if the goal is FULLY satisfied. Do not stop if there are missing connections or nodes."
+        "\nIf steps remain, provide them in the 'plan' field and leave 'response' empty."
+        "\nOnly provide a 'response' when the task is 100% complete and verified against the canvas state."
+        "\nIMPORTANT: Do not plan to add nodes that are already present in the Current Canvas."
     )
-    
-    result = await agent.run(state['input'])
-    print(f"  ... [Planner] Plan: {result.output.steps}")
-    return {"plan": result.output.steps}
 
-# --- 4. Node B: The Executor (Step Solver) ---
 
-async def executor_step_node(state: PlanExecuteState):
-    # This node executes the *first* step in the plan
-    step_to_execute = state['plan'][0]
-    print(f"  ... [Executor] Executing step: '{step_to_execute}' ...")
-    
-    # Run the native PydanticAI executor agent
-    # The dynamic system prompt (registered below or above) will inject the current state.
-    
-    result = await executor_agent.run(step_to_execute)
-    output = result.output # Expecting str by default if no output_type
-    
-    print(f"  ... [Executor] Result: {output}")
-    
-    return {
-        "past_steps": [(step_to_execute, str(output))] # Cast to str just in case
-    }
+# --- 4. Logic & Graph Construction ---
 
-# --- 5. Node C: The Re-Planner ---
+def create_graph(deps: AgentDeps):
+    
+    # -- Node Implementations (closing over deps) --
+    
+    async def planner_node(state: PlanExecuteState):
+        print("  ... [Planner] Creating plan ...")
+        result = await planner_agent.run(state['input'], deps=deps)
+        print(f"  ... [Planner] Plan: {result.output.steps}")
+        return {"plan": result.output.steps}
 
-class RePlan(BaseModel):
-    """The updated plan or final response."""
-    response: Optional[str] = Field(description="Final answer to user if done.")
-    plan: Optional[List[str]] = Field(description="New sequential list of remaining steps.")
+    async def executor_step_node(state: PlanExecuteState):
+        if not state['plan']:
+            print("  ... [Executor] No steps left in plan.")
+            return {"past_steps": []}
+            
+        step_to_execute = state['plan'][0]
+        print(f"  ... [Executor] Executing step: '{step_to_execute}' ...")
+        
+        result = await executor_agent.run(step_to_execute, deps=deps)
+        output = result.output 
+        
+        print(f"  ... [Executor] Result: {output}")
+        return {
+            "past_steps": [(step_to_execute, str(output))] 
+        }
 
-async def replanner_node(state: PlanExecuteState):
-    print("  ... [Replanner] Reviewing progress ...")
+    async def replanner_node(state: PlanExecuteState):
+        print("  ... [Replanner] Reviewing progress ...")
+        prompt = f"""
+        Original Input: {state['input']}
+        Original Plan: {state['plan']}
+        Past Steps and Results: {state['past_steps']}
+        
+        Update the plan or finish.
+        """
+        
+        result = await replanner_agent.run(prompt, deps=deps)
+        decision = result.output
+        
+        if decision.response:
+            print(f"  ... [Replanner] Done! Response: {decision.response}")
+            return {"response": decision.response, "plan": []}
+        else:
+            print(f"  ... [Replanner] New Plan: {decision.plan}")
+            return {"plan": decision.plan}
+
+    def planner_edge(state: PlanExecuteState):
+        if state.get("response"):
+            return END
+        return "executor" 
+
+    # -- Graph Definition --
     
-    agent = Agent(
-        'openai:gpt-4o',
-        output_type=RePlan,
-        system_prompt=(
-            "You are a Replanner."
-            f"\nCurrent Canvas: {json.dumps(CANVAS_DB)}"
-            "\nReview the original goal, the steps completed so far, and the result of the last step."
-            "\nUpdate the plan if necessary. If the task is substantially complete, provide a final response."
-            "\nIf more steps are needed, provide the *remaining* steps."
-            "\nIMPORTANT: Do not plan to add nodes that are already present in the Current Canvas."
-        )
-    )
+    workflow = StateGraph(PlanExecuteState)
+    workflow.add_node("planner", planner_node)
+    workflow.add_node("executor", executor_step_node)
+    workflow.add_node("re_planner", replanner_node)
+
+    workflow.set_entry_point("planner")
+    workflow.add_edge("planner", "executor")
+    workflow.add_edge("executor", "re_planner")
+    workflow.add_conditional_edges("re_planner", planner_edge)
+
+    return workflow.compile()
+
+# --- 5. CLI Runner ---
+
+def render_canvas(canvas: CanvasRepository):
+    """Helper to visualize the graph in ASCII"""
+    state = canvas.get_state()
+    nodes = state["nodes"]
+    edges = state["edges"]
     
-    prompt = f"""
-    Original Input: {state['input']}
-    Original Plan: {state['plan']}
-    Past Steps and Results: {state['past_steps']}
-    
-    Update the plan or finish.
-    """
-    
-    result = await agent.run(prompt)
-    decision = result.output # Wait, user said .output?
-    # I need to use .output based on visual evidence from previous turns.
-    
-    if decision.response:
-        print(f"  ... [Replanner] Done! Response: {decision.response}")
-        return {"response": decision.response, "plan": []}
+    print("\n" + "="*40)
+    print("      CURRENT CANVAS STATE      ")
+    print("="*40)
+    if not nodes:
+        print("(Empty)")
     else:
-        print(f"  ... [Replanner] New Plan: {decision.plan}")
-        return {"plan": decision.plan}
-
-# --- 6. Logic & Graph ---
-
-def planner_edge(state: PlanExecuteState):
-    if state.get("response"):
-        return END
-    return "executor" # execute first step
-
-workflow = StateGraph(PlanExecuteState)
-workflow.add_node("planner", planner_node)
-workflow.add_node("executor", executor_step_node)
-workflow.add_node("re_planner", replanner_node)
-
-workflow.set_entry_point("planner")
-workflow.add_edge("planner", "executor")
-workflow.add_edge("executor", "re_planner")
-workflow.add_conditional_edges("re_planner", planner_edge)
-
-app = workflow.compile()
-
-# --- 7. CLI Runner ---
+        print(f"Nodes ({len(nodes)}):")
+        for n in nodes:
+            print(f"  [{n['type'].upper()}] {n['label']} (ID: {n['id'][:4]}..)")
+        
+        print(f"\nEdges ({len(edges)}):")
+        for e in edges:
+            print(f"  {e['source'][:4]}.. --> {e['target'][:4]}..")
+    print("="*40 + "\n")
 
 async def main():
     print("Welcome to the Plan-and-Execute Toy Agent!")
     print("Try: 'Create a twitter source, filter it, and sink to database'")
     
+    # Initialize State
+    canvas_repo = InMemoryCanvas()
+    deps = AgentDeps(canvas=canvas_repo)
+    
+    # Build Graph with Deps
+    app = create_graph(deps)
+    
     while True:
-        render_canvas()
+        render_canvas(canvas_repo)
         user_input = input("You: ")
         if user_input.lower() in ["quit", "exit"]:
             break
