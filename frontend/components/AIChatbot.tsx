@@ -45,32 +45,7 @@ const models = [
     { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro' },
     { id: 'llama-3.1-70b', name: 'Llama 3.1 70B' },
 ];
-const sampleResponses = [
-    {
-        content: "I'd be happy to help you with that! React is a powerful JavaScript library for building user interfaces. What specific aspect would you like to explore?",
-        reasoning: "The user is asking about React, which is a broad topic. I should provide a helpful overview while asking for more specific information to give a more targeted response.",
-        sources: [
-            { title: "React Official Documentation", url: "https://react.dev" },
-            { title: "React Developer Tools", url: "https://react.dev/learn" }
-        ]
-    },
-    {
-        content: "Next.js is an excellent framework built on top of React that provides server-side rendering, static site generation, and many other powerful features out of the box.",
-        reasoning: "The user mentioned Next.js, so I should explain its relationship to React and highlight its key benefits for modern web development.",
-        sources: [
-            { title: "Next.js Documentation", url: "https://nextjs.org/docs" },
-            { title: "Vercel Next.js Guide", url: "https://vercel.com/guides/nextjs" }
-        ]
-    },
-    {
-        content: "TypeScript adds static type checking to JavaScript, which helps catch errors early and improves code quality. It's particularly valuable in larger applications.",
-        reasoning: "TypeScript is becoming increasingly important in modern development. I should explain its benefits while keeping the explanation accessible.",
-        sources: [
-            { title: "TypeScript Handbook", url: "https://www.typescriptlang.org/docs" },
-            { title: "TypeScript with React", url: "https://react.dev/learn/typescript" }
-        ]
-    }
-];
+
 const ChatWindow = () => {
     const [messages, setMessages] = useState<ChatMessage[]>([
         {
@@ -90,65 +65,101 @@ const ChatWindow = () => {
     const [isTyping, setIsTyping] = useState(false);
     const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
 
-    const simulateTyping = useCallback((messageId: string, content: string, reasoning?: string, sources?: Array<{ title: string; url: string }>) => {
-        let currentIndex = 0;
-        const typeInterval = setInterval(() => {
-            setMessages(prev => prev.map(msg => {
-                if (msg.id === messageId) {
-                    const currentContent = content.slice(0, currentIndex);
-                    return {
-                        ...msg,
-                        content: currentContent,
-                        isStreaming: currentIndex < content.length,
-                        reasoning: currentIndex >= content.length ? reasoning : undefined,
-                        sources: currentIndex >= content.length ? sources : undefined,
-                    };
-                }
-                return msg;
-            }));
-            currentIndex += Math.random() > 0.1 ? 1 : 0; // Simulate variable typing speed
-
-            if (currentIndex >= content.length) {
-                clearInterval(typeInterval);
-                setIsTyping(false);
-                setStreamingMessageId(null);
-            }
-        }, 50);
-        return () => clearInterval(typeInterval);
-    }, []);
-    const handleSubmit: FormEventHandler<HTMLFormElement> = useCallback((event) => {
+    const handleSubmit: FormEventHandler<HTMLFormElement> = useCallback(async (event) => {
         event.preventDefault();
 
         if (!inputValue.trim() || isTyping) return;
-        // Add user message
+
+        const userMessageId = nanoid();
         const userMessage: ChatMessage = {
-            id: nanoid(),
+            id: userMessageId,
             content: inputValue.trim(),
             role: 'user',
             timestamp: new Date(),
         };
+
         setMessages(prev => [...prev, userMessage]);
         setInputValue('');
         setIsTyping(true);
-        // Simulate AI response with delay
-        setTimeout(() => {
-            const responseData = sampleResponses[Math.floor(Math.random() * sampleResponses.length)];
-            const assistantMessageId = nanoid();
 
-            const assistantMessage: ChatMessage = {
-                id: assistantMessageId,
-                content: '',
-                role: 'assistant',
-                timestamp: new Date(),
-                isStreaming: true,
-            };
-            setMessages(prev => [...prev, assistantMessage]);
-            setStreamingMessageId(assistantMessageId);
+        const assistantMessageId = nanoid();
+        const assistantMessage: ChatMessage = {
+            id: assistantMessageId,
+            content: '',
+            role: 'assistant',
+            timestamp: new Date(),
+            isStreaming: true,
+            reasoning: '', // Start with empty reasoning but visible
+        };
+        setMessages(prev => [...prev, assistantMessage]);
+        setStreamingMessageId(assistantMessageId);
 
-            // Start typing simulation
-            simulateTyping(assistantMessageId, responseData.content, responseData.reasoning, responseData.sources);
-        }, 800);
-    }, [inputValue, isTyping, simulateTyping]);
+        try {
+            const response = await fetch('http://localhost:8000/api/chat', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    messages: [{ role: 'user', content: userMessage.content }],
+                    id: 'session-1',
+                }),
+            });
+
+            if (!response.body) throw new Error('No response body');
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || ''; // Keep the last partial line in the buffer
+
+                for (const line of lines) {
+                    if (!line.trim()) continue;
+                    try {
+                        const data = JSON.parse(line);
+
+                        setMessages(prev => prev.map(msg => {
+                            if (msg.id === assistantMessageId) {
+                                let updates: Partial<ChatMessage> = {};
+
+                                if (data.type === 'reasoning_chunk') {
+                                    updates.reasoning = (msg.reasoning || '') + data.text;
+                                } else if (data.type === 'content_chunk') {
+                                    updates.content = (msg.content || '') + data.text;
+                                } else if (data.type === 'sources') {
+                                    updates.sources = data.data;
+                                } else if (data.type === 'done') {
+                                    updates.isStreaming = false;
+                                }
+
+                                return { ...msg, ...updates };
+                            }
+                            return msg;
+                        }));
+
+                        if (data.type === 'done') {
+                            setIsTyping(false);
+                            setStreamingMessageId(null);
+                        }
+
+                    } catch (e) {
+                        console.error('Error parsing line:', line, e);
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('Fetch error:', error);
+            setIsTyping(false);
+            setStreamingMessageId(null);
+        }
+    }, [inputValue, isTyping]);
     const handleReset = useCallback(() => {
         setMessages([
             {

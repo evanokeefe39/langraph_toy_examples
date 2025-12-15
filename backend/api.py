@@ -12,7 +12,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -38,31 +38,39 @@ def get_or_create_session(session_id: str) -> AgentDeps:
 
 @app.post("/api/chat")
 async def chat(request: ChatRequest):
-    # Dummy Endpoint for UI Verification
     async def event_generator():
-        # Simulate Planning (Thinking/Reasoning)
-        await asyncio.sleep(0.5)
-        yield "\n[Reasoning]: I need to create a source and sink as requested.\n"
+        # Simulate thinking
+        reasoning_steps = [
+            "Analyzing user request...",
+            "Checking knowledge base...",
+            "Identifying relevant documentation...",
+            "Formulating response..."
+        ]
         
-        await asyncio.sleep(1)
-        yield "\n[Plan]: ['Add Twitter Source', 'Add Database Sink', 'Connect them']\n"
-        
-        # Simulate Execution
-        await asyncio.sleep(1)
-        yield "\n[Tool Call]: add_node(type='source', label='Twitter')\n"
-        await asyncio.sleep(0.5)
-        yield "\n[Result]: Node 'Twitter' added (ID: 1234)\n"
-        
-        await asyncio.sleep(1)
-        yield "\n[Tool Call]: add_node(type='sink', label='Postgres')\n"
-        await asyncio.sleep(0.5)
-        yield "\n[Result]: Node 'Postgres' added (ID: 5678)\n"
-        
-        # Final Response
-        await asyncio.sleep(1)
-        yield "\n[Final]: I have created the Twitter source and Postgres sink and connected them.\n"
+        for step in reasoning_steps:
+            await asyncio.sleep(0.5)
+            # Send reasoning chunk
+            data = {"type": "reasoning_chunk", "text": f"{step}\n"}
+            yield json.dumps(data) + "\n"
 
-    return StreamingResponse(event_generator(), media_type="text/plain")
+        # Simulate sources finding
+        await asyncio.sleep(0.5)
+        sources = [
+            {"title": "FastAPI Documentation", "url": "https://fastapi.tiangolo.com/"},
+            {"title": "React Docs", "url": "https://react.dev/"}
+        ]
+        yield json.dumps({"type": "sources", "data": sources}) + "\n"
+
+        # Simulate content generation
+        response_text = "I can help you with that! This response is streaming from the FastAPI backend. \n\nWe are mocking the connection to demonstrate: \n1. Reasoning states\n2. Real-time streaming\n3. Source citation"
+        
+        for char in response_text:
+            await asyncio.sleep(0.02)
+            yield json.dumps({"type": "content_chunk", "text": char}) + "\n"
+
+        yield json.dumps({"type": "done"}) + "\n"
+
+    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
 if __name__ == "__main__":
     import uvicorn
