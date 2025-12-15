@@ -382,6 +382,7 @@ const ChatWindow = () => {
                                                                     <Tool key={innerPart.id} defaultOpen={false} className="mb-0">
                                                                         <ToolHeader
                                                                             type="tool-call"
+                                                                            toolName={(innerPart.tool as any).toolName}
                                                                             state={innerPart.tool.state}
                                                                             className="bg-background py-2"
                                                                         />

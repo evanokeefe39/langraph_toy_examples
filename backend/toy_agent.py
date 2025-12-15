@@ -13,6 +13,8 @@ from pydantic_ai import Agent, RunContext
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langchain_core.messages import ToolMessage, AIMessage, BaseMessage
+from langchain_core.callbacks import dispatch_custom_event, adispatch_custom_event
+import operator
 
 # --- 0. Mocks & Setup ---
 load_dotenv()
@@ -63,7 +65,7 @@ class Response(BaseModel):
 class PlanExecuteState(TypedDict):
     input: str
     plan: list[str]
-    past_steps: list[tuple[str, str]]
+    past_steps: Annotated[list[tuple[str, str]], operator.add]
     response: Optional[str]
     # For the internal executor agent:
     executor_messages: Annotated[List[BaseMessage], add_messages] 
@@ -130,6 +132,17 @@ def tool_add_node(ctx: RunContext[AgentDeps], type: str, label: str) -> str:
     new_id = str(uuid4())
     node = {"id": new_id, "type": type, "label": label}
     ctx.deps.canvas.add_node(node)
+    
+    # Emit custom event for UI visibility
+    dispatch_custom_event(
+        "custom_tool_call",
+        {
+            "toolName": "add_node",
+            "input": {"type": type, "label": label},
+            "output": {"id": new_id, "status": "success"}
+        }
+    )
+    
     return json.dumps({"status": "success", "msg": f"Added node '{label}'", "id": new_id})
 
 @executor_agent.tool
@@ -155,6 +168,17 @@ def tool_connect_nodes(ctx: RunContext[AgentDeps], source_label: str, target_lab
     
     edge = {"source": s_node['id'], "target": t_node['id']}
     ctx.deps.canvas.add_edge(edge)
+    
+    # Emit custom event for UI visibility
+    dispatch_custom_event(
+        "custom_tool_call",
+        {
+            "toolName": "connect_nodes",
+            "input": {"source_label": source_label, "target_label": target_label},
+            "output": {"status": "success"}
+        }
+    )
+    
     return json.dumps({"status": "success", "msg": f"Connected {source_label} to {target_label}"})
 
 # -- Replanner Agent --
@@ -186,8 +210,10 @@ def create_graph(deps: AgentDeps):
     
     async def planner_node(state: PlanExecuteState):
         print("  ... [Planner] Creating plan ...")
+        await adispatch_custom_event("custom_reasoning", {"text": "[Planner] Creating plan based on request..."})
         result = await planner_agent.run(state['input'], deps=deps)
         print(f"  ... [Planner] Plan: {result.output.steps}")
+        await adispatch_custom_event("custom_reasoning", {"text": f"[Planner] Plan created with {len(result.output.steps)} steps."})
         return {"plan": result.output.steps}
 
     async def executor_step_node(state: PlanExecuteState):
@@ -197,6 +223,7 @@ def create_graph(deps: AgentDeps):
             
         step_to_execute = state['plan'][0]
         print(f"  ... [Executor] Executing step: '{step_to_execute}' ...")
+        await adispatch_custom_event("custom_reasoning", {"text": f"[Executor] Executing step: '{step_to_execute}'"})
         
         result = await executor_agent.run(step_to_execute, deps=deps)
         output = result.output 
@@ -208,6 +235,7 @@ def create_graph(deps: AgentDeps):
 
     async def replanner_node(state: PlanExecuteState):
         print("  ... [Replanner] Reviewing progress ...")
+        await adispatch_custom_event("custom_reasoning", {"text": "[Replanner] Reviewing progress..."})
         prompt = f"""
         Original Input: {state['input']}
         Original Plan: {state['plan']}
