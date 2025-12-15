@@ -3,3 +3,5 @@ pydantic-ai
 langchain-openai
 python-dotenv
 tabulate
+fastapi
+uvicorn
