@@ -90,7 +90,7 @@ async def chat(request: ChatRequest):
                     "type": "tool-call",
                     "toolCallId": tool_id,
                     "toolName": tool_name,
-                    "args": args,
+                    "input": args,
                     "state": "input-available"
                 }
             }) + "\n"
@@ -105,7 +105,7 @@ async def chat(request: ChatRequest):
                     "type": "tool-result",
                     "toolCallId": tool_id,
                     "toolName": tool_name,
-                    "args": args,
+                    "input": args,
                     "result": json.dumps(result_data),
                     "state": "output-available"
                 }
