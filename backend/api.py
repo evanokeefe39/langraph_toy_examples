@@ -39,33 +39,100 @@ def get_or_create_session(session_id: str) -> AgentDeps:
 @app.post("/api/chat")
 async def chat(request: ChatRequest):
     async def event_generator():
-        # Simulate thinking
-        reasoning_steps = [
-            "Analyzing user request...",
-            "Checking knowledge base...",
-            "Identifying relevant documentation...",
-            "Formulating response..."
+        # Setup the plan
+        plan_steps = [
+            "Add a node with type 'twitter' and label 'Twitter'",
+            "Add a node with type 'process' and label 'Filter'",
+            "Add a node with type 'sink' and label 'Database'",
+            "Connect the 'Twitter' node to the 'Filter' node",
+            "Connect the 'Filter' node to the 'Database' node"
         ]
         
-        for step in reasoning_steps:
-            await asyncio.sleep(0.5)
-            # Send reasoning chunk
-            data = {"type": "reasoning_chunk", "text": f"{step}\n"}
-            yield json.dumps(data) + "\n"
-
-        # Simulate sources finding
+        # 1. Planner Phase
         await asyncio.sleep(0.5)
-        sources = [
-            {"title": "FastAPI Documentation", "url": "https://fastapi.tiangolo.com/"},
-            {"title": "React Docs", "url": "https://react.dev/"}
-        ]
-        yield json.dumps({"type": "sources", "data": sources}) + "\n"
+        yield json.dumps({"type": "reasoning_chunk", "text": "[Planner] Creating plan based on request...\n"}) + "\n"
+        await asyncio.sleep(0.4)
+        yield json.dumps({"type": "reasoning_chunk", "text": f"[Planner] Plan: {json.dumps(plan_steps)}\n"}) + "\n"
+        
+        # Send Initial Plan
+        yield json.dumps({
+            "type": "tasks", 
+            "data": [{"title": "Execution Plan", "items": plan_steps}]
+        }) + "\n"
 
-        # Simulate content generation
-        response_text = "I can help you with that! This response is streaming from the FastAPI backend. \n\nWe are mocking the connection to demonstrate: \n1. Reasoning states\n2. Real-time streaming\n3. Source citation"
+        # 2. Execution Loop
+        for i, step in enumerate(plan_steps):
+            await asyncio.sleep(0.5)
+            yield json.dumps({"type": "reasoning_chunk", "text": f"[Executor] Executing step: '{step}' ...\n"}) + "\n"
+            
+            # Simulate Tool Call
+            tool_name = "connect_nodes" if "Connect" in step else "add_node"
+            tool_id = f"call_{i}"
+            
+            # Construct args based on step text (mock parsing)
+            if "Twitter" in step:
+                args = {"type": "source", "label": "Twitter"}
+            elif "Filter" in step:
+                args = {"type": "process", "label": "Filter"}
+            elif "Database" in step:
+                args = {"type": "sink", "label": "Database"}
+            elif "Twitter" in step and "Filter" in step:
+                args = {"source_label": "Twitter", "target_label": "Filter"}
+            elif "Filter" in step and "Database" in step:
+                args = {"source_label": "Filter", "target_label": "Database"}
+            else:
+                args = {}
+
+            # Emit Tool Call (Running)
+            yield json.dumps({
+                "type": "tool_call",
+                "tool": {
+                    "type": "tool-call",
+                    "toolCallId": tool_id,
+                    "toolName": tool_name,
+                    "args": args,
+                    "state": "input-available"
+                }
+            }) + "\n"
+            
+            await asyncio.sleep(1.0)
+            
+            # Emit Tool Result (Completed)
+            result_data = {"status": "success", "id": f"node-{i}"} if tool_name == "add_node" else {"status": "success", "msg": "Connected"}
+            yield json.dumps({
+                "type": "tool_call",
+                "tool": {
+                    "type": "tool-result",
+                    "toolCallId": tool_id,
+                    "toolName": tool_name,
+                    "args": args,
+                    "result": json.dumps(result_data),
+                    "state": "output-available"
+                }
+            }) + "\n"
+
+            # Update Plan (Mark current as done)
+            await asyncio.sleep(0.2)
+            updated_items = []
+            for j, s in enumerate(plan_steps):
+                if j <= i:
+                    updated_items.append(f"✅ {s}")
+                else:
+                    updated_items.append(s)
+            
+            yield json.dumps({
+                "type": "tasks", 
+                "data": [{"title": "Execution Plan", "items": updated_items}]
+            }) + "\n"
+
+            yield json.dumps({"type": "reasoning_chunk", "text": "[Replanner] Reviewing progress ...\n"}) + "\n"
+        
+        # 3. Final Response
+        await asyncio.sleep(0.5)
+        response_text = "The task is complete. The Twitter data source has been added, filtered, and connected to the database as outlined in the original input."
         
         for char in response_text:
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(0.01)
             yield json.dumps({"type": "content_chunk", "text": char}) + "\n"
 
         yield json.dumps({"type": "done"}) + "\n"

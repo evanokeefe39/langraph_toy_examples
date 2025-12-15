@@ -25,11 +25,14 @@ import {
     ReasoningTrigger,
 } from '@/components/ui/shadcn-io/ai/reasoning';
 import { Source, Sources, SourcesContent, SourcesTrigger } from '@/components/ui/shadcn-io/ai/source';
+import { Task, TaskTrigger, TaskContent, TaskItem, TaskItemFile } from '@/components/ui/shadcn-io/ai/task';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { Tool, ToolHeader, ToolInput, ToolOutput, ToolContent } from '@/components/ui/shadcn-io/ai/tool';
 import { MicIcon, PaperclipIcon, RotateCcwIcon } from 'lucide-react';
 import { nanoid } from 'nanoid';
 import { type ChangeEvent, type FormEventHandler, useCallback, useEffect, useState } from 'react';
+import type { ToolUIPart } from 'ai';
 type ChatMessage = {
     id: string;
     content: string;
@@ -38,6 +41,8 @@ type ChatMessage = {
     reasoning?: string;
     sources?: Array<{ title: string; url: string }>;
     isStreaming?: boolean;
+    tools?: ToolUIPart[];
+    tasks?: Array<{ title: string; items: string[] }>;
 };
 const models = [
     { id: 'gpt-4o', name: 'GPT-4o' },
@@ -135,6 +140,20 @@ const ChatWindow = () => {
                                     updates.content = (msg.content || '') + data.text;
                                 } else if (data.type === 'sources') {
                                     updates.sources = data.data;
+                                } else if (data.type === 'tasks') {
+                                    updates.tasks = data.data;
+                                } else if (data.type === 'tool_call') {
+                                    const toolPart = data.tool as ToolUIPart;
+                                    const currentTools = msg.tools || [];
+                                    const existingToolIndex = currentTools.findIndex(t => t.toolCallId === toolPart.toolCallId);
+
+                                    let newTools = [...currentTools];
+                                    if (existingToolIndex >= 0) {
+                                        newTools[existingToolIndex] = toolPart;
+                                    } else {
+                                        newTools.push(toolPart);
+                                    }
+                                    updates.tools = newTools;
                                 } else if (data.type === 'done') {
                                     updates.isStreaming = false;
                                 }
@@ -222,6 +241,44 @@ const ChatWindow = () => {
                                         <ReasoningTrigger />
                                         <ReasoningContent>{message.reasoning || ''}</ReasoningContent>
                                     </Reasoning>
+                                </div>
+                            )}
+
+                            {/* Tools / Actions */}
+                            {message.tools && message.tools.length > 0 && (
+                                <div className="ml-10 space-y-2">
+                                    {message.tools.map((tool) => (
+                                        <Tool key={tool.toolCallId} defaultOpen={false}>
+                                            <ToolHeader
+                                                type="tool-call"
+                                                state={tool.state}
+                                                className="bg-muted/40"
+                                            />
+                                            <ToolContent>
+                                                <ToolInput input={tool.input} />
+                                                {'result' in tool && !!tool.result && (
+                                                    <ToolOutput output={JSON.stringify(JSON.parse(tool.result as string), null, 2)} errorText={undefined} />
+                                                )}
+                                            </ToolContent>
+                                        </Tool>
+                                    ))}
+                                </div>
+                            )}
+                            {/* Tasks */}
+                            {message.tasks && message.tasks.length > 0 && (
+                                <div className="ml-10 space-y-2">
+                                    {message.tasks.map((task, index) => (
+                                        <Task key={index} defaultOpen={true}>
+                                            <TaskTrigger title={task.title} />
+                                            <TaskContent>
+                                                {task.items.map((item, itemIndex) => (
+                                                    <TaskItem key={itemIndex}>
+                                                        {index === 0 ? <TaskItemFile>{item}</TaskItemFile> : item}
+                                                    </TaskItem>
+                                                ))}
+                                            </TaskContent>
+                                        </Task>
+                                    ))}
                                 </div>
                             )}
                             {/* Sources */}
