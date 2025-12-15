@@ -208,14 +208,7 @@ const ChatWindow = () => {
                         <div key={message.id} className="space-y-3">
                             <Message from={message.role}>
                                 <MessageContent>
-                                    {message.isStreaming && message.content === '' ? (
-                                        <div className="flex items-center gap-2">
-                                            <Loader size={14} />
-                                            <span className="text-muted-foreground text-sm">Thinking...</span>
-                                        </div>
-                                    ) : (
-                                        message.content
-                                    )}
+                                    {message.content}
                                 </MessageContent>
                                 <MessageAvatar
                                     src={message.role === 'user' ? 'https://github.com/dovazencot.png' : 'https://github.com/vercel.png'}
@@ -225,7 +218,7 @@ const ChatWindow = () => {
                             {/* Reasoning */}
                             {(message.reasoning || message.isStreaming) && (
                                 <div className="ml-10">
-                                    <Reasoning isStreaming={message.isStreaming} defaultOpen={false}>
+                                    <Reasoning isStreaming={message.isStreaming && !message.content} defaultOpen={false}>
                                         <ReasoningTrigger />
                                         <ReasoningContent>{message.reasoning || ''}</ReasoningContent>
                                     </Reasoning>
