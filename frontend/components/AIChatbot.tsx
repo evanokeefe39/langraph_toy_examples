@@ -33,16 +33,18 @@ import { MicIcon, PaperclipIcon, RotateCcwIcon } from 'lucide-react';
 import { nanoid } from 'nanoid';
 import { type ChangeEvent, type FormEventHandler, useCallback, useEffect, useState } from 'react';
 import type { ToolUIPart } from 'ai';
+type MessagePart =
+    | { type: 'content'; content: string; id: string }
+    | { type: 'reasoning'; content: string; id: string; isStreaming?: boolean }
+    | { type: 'tool'; tool: ToolUIPart; id: string }
+    | { type: 'task'; tasks: Array<{ title: string; items: string[] }>; id: string }
+    | { type: 'source'; sources: Array<{ title: string; url: string }>; id: string };
+
 type ChatMessage = {
     id: string;
-    content: string;
     role: 'user' | 'assistant';
     timestamp: Date;
-    reasoning?: string;
-    sources?: Array<{ title: string; url: string }>;
-    isStreaming?: boolean;
-    tools?: ToolUIPart[];
-    tasks?: Array<{ title: string; items: string[] }>;
+    parts: MessagePart[];
 };
 const models = [
     { id: 'gpt-4o', name: 'GPT-4o' },
@@ -55,12 +57,11 @@ const ChatWindow = () => {
     const [messages, setMessages] = useState<ChatMessage[]>([
         {
             id: nanoid(),
-            content: "Hello! I'm your AI assistant. I can help you with coding questions, explain concepts, and provide guidance on web development topics. What would you like to know?",
             role: 'assistant',
             timestamp: new Date(),
-            sources: [
-                { title: "Getting Started Guide", url: "#" },
-                { title: "API Documentation", url: "#" }
+            parts: [
+                { type: 'content', content: "Hello! I'm your AI assistant. I can help you with coding questions, explain concepts, and provide guidance on web development topics. What would you like to know?", id: nanoid() },
+                { type: 'source', sources: [{ title: "Getting Started Guide", url: "#" }, { title: "API Documentation", url: "#" }], id: nanoid() }
             ]
         }
     ]);
@@ -78,9 +79,9 @@ const ChatWindow = () => {
         const userMessageId = nanoid();
         const userMessage: ChatMessage = {
             id: userMessageId,
-            content: inputValue.trim(),
             role: 'user',
             timestamp: new Date(),
+            parts: [{ type: 'content', content: inputValue.trim(), id: nanoid() }]
         };
 
         setMessages(prev => [...prev, userMessage]);
@@ -90,11 +91,9 @@ const ChatWindow = () => {
         const assistantMessageId = nanoid();
         const assistantMessage: ChatMessage = {
             id: assistantMessageId,
-            content: '',
             role: 'assistant',
             timestamp: new Date(),
-            isStreaming: true,
-            reasoning: '', // Start with empty reasoning but visible
+            parts: [],
         };
         setMessages(prev => [...prev, assistantMessage]);
         setStreamingMessageId(assistantMessageId);
@@ -106,7 +105,7 @@ const ChatWindow = () => {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    messages: [{ role: 'user', content: userMessage.content }],
+                    messages: [{ role: 'user', content: inputValue.trim() }],
                     id: 'session-1',
                 }),
             });
@@ -132,33 +131,48 @@ const ChatWindow = () => {
 
                         setMessages(prev => prev.map(msg => {
                             if (msg.id === assistantMessageId) {
-                                let updates: Partial<ChatMessage> = {};
+                                const newParts = [...msg.parts];
+                                const lastPart = newParts[newParts.length - 1];
 
                                 if (data.type === 'reasoning_chunk') {
-                                    updates.reasoning = (msg.reasoning || '') + data.text;
-                                } else if (data.type === 'content_chunk') {
-                                    updates.content = (msg.content || '') + data.text;
-                                } else if (data.type === 'sources') {
-                                    updates.sources = data.data;
-                                } else if (data.type === 'tasks') {
-                                    updates.tasks = data.data;
-                                } else if (data.type === 'tool_call') {
-                                    const toolPart = data.tool as ToolUIPart;
-                                    const currentTools = msg.tools || [];
-                                    const existingToolIndex = currentTools.findIndex(t => t.toolCallId === toolPart.toolCallId);
-
-                                    let newTools = [...currentTools];
-                                    if (existingToolIndex >= 0) {
-                                        newTools[existingToolIndex] = toolPart;
+                                    if (lastPart && lastPart.type === 'reasoning') {
+                                        newParts[newParts.length - 1] = { ...lastPart, content: lastPart.content + data.text };
                                     } else {
-                                        newTools.push(toolPart);
+                                        newParts.push({ type: 'reasoning', content: data.text, id: nanoid(), isStreaming: true });
                                     }
-                                    updates.tools = newTools;
+                                } else if (data.type === 'content_chunk') {
+                                    if (lastPart && lastPart.type === 'content') {
+                                        newParts[newParts.length - 1] = { ...lastPart, content: lastPart.content + data.text };
+                                    } else {
+                                        newParts.push({ type: 'content', content: data.text, id: nanoid() });
+                                    }
+                                } else if (data.type === 'sources') {
+                                    newParts.push({ type: 'source', sources: data.data, id: nanoid() });
+                                } else if (data.type === 'tasks') {
+                                    const existingTaskIndex = newParts.findIndex(p => p.type === 'task');
+                                    if (existingTaskIndex >= 0) {
+                                        newParts[existingTaskIndex] = { ...newParts[existingTaskIndex], tasks: data.data } as MessagePart;
+                                    } else {
+                                        newParts.push({ type: 'task', tasks: data.data, id: nanoid() });
+                                    }
+                                } else if (data.type === 'tool_call') {
+                                    const toolPartData = data.tool as ToolUIPart;
+                                    const existingToolIndex = newParts.findIndex(p => p.type === 'tool' && p.tool.toolCallId === toolPartData.toolCallId);
+
+                                    if (existingToolIndex >= 0) {
+                                        newParts[existingToolIndex] = { ...newParts[existingToolIndex], tool: toolPartData } as MessagePart;
+                                    } else {
+                                        newParts.push({ type: 'tool', tool: toolPartData, id: nanoid() });
+                                    }
                                 } else if (data.type === 'done') {
-                                    updates.isStreaming = false;
+                                    // Close any open streaming reasoning blocks
+                                    return {
+                                        ...msg,
+                                        parts: newParts.map(p => p.type === 'reasoning' ? { ...p, isStreaming: false } : p)
+                                    };
                                 }
 
-                                return { ...msg, ...updates };
+                                return { ...msg, parts: newParts };
                             }
                             return msg;
                         }));
@@ -183,12 +197,11 @@ const ChatWindow = () => {
         setMessages([
             {
                 id: nanoid(),
-                content: "Hello! I'm your AI assistant. I can help you with coding questions, explain concepts, and provide guidance on web development topics. What would you like to know?",
                 role: 'assistant',
                 timestamp: new Date(),
-                sources: [
-                    { title: "Getting Started Guide", url: "#" },
-                    { title: "API Documentation", url: "#" }
+                parts: [
+                    { type: 'content', content: "Hello! I'm your AI assistant. I can help you with coding questions, explain concepts, and provide guidance on web development topics. What would you like to know?", id: nanoid() },
+                    { type: 'source', sources: [{ title: "Getting Started Guide", url: "#" }, { title: "API Documentation", url: "#" }], id: nanoid() }
                 ]
             }
         ]);
@@ -227,73 +240,81 @@ const ChatWindow = () => {
                         <div key={message.id} className="space-y-3">
                             <Message from={message.role}>
                                 <MessageContent>
-                                    {message.content}
+                                    {message.parts.map((part) => {
+                                        if (part.type === 'content') {
+                                            return <div key={part.id}>{part.content}</div>;
+                                        }
+                                        return null;
+                                    })}
+                                    {message.parts.length === 0 && message.role === 'assistant' && <span className="animate-pulse">Thinking...</span>}
                                 </MessageContent>
                                 <MessageAvatar
                                     src={message.role === 'user' ? 'https://github.com/dovazencot.png' : 'https://github.com/vercel.png'}
                                     name={message.role === 'user' ? 'User' : 'AI'}
                                 />
                             </Message>
-                            {/* Reasoning */}
-                            {(message.reasoning || message.isStreaming) && (
-                                <div className="ml-10">
-                                    <Reasoning isStreaming={message.isStreaming && !message.content} defaultOpen={false}>
-                                        <ReasoningTrigger />
-                                        <ReasoningContent>{message.reasoning || ''}</ReasoningContent>
-                                    </Reasoning>
-                                </div>
-                            )}
 
-                            {/* Tools / Actions */}
-                            {message.tools && message.tools.length > 0 && (
-                                <div className="ml-10 space-y-2">
-                                    {message.tools.map((tool) => (
-                                        <Tool key={tool.toolCallId} defaultOpen={false}>
-                                            <ToolHeader
-                                                type="tool-call"
-                                                state={tool.state}
-                                                className="bg-muted/40"
-                                            />
-                                            <ToolContent>
-                                                <ToolInput input={tool.input} />
-                                                {'result' in tool && !!tool.result && (
-                                                    <ToolOutput output={JSON.stringify(JSON.parse(tool.result as string), null, 2)} errorText={undefined} />
-                                                )}
-                                            </ToolContent>
-                                        </Tool>
-                                    ))}
-                                </div>
-                            )}
-                            {/* Tasks */}
-                            {message.tasks && message.tasks.length > 0 && (
-                                <div className="ml-10 space-y-2">
-                                    {message.tasks.map((task, index) => (
-                                        <Task key={index} defaultOpen={true}>
-                                            <TaskTrigger title={task.title} />
-                                            <TaskContent>
-                                                {task.items.map((item, itemIndex) => (
-                                                    <TaskItem key={itemIndex}>
-                                                        {index === 0 ? <TaskItemFile>{item}</TaskItemFile> : item}
-                                                    </TaskItem>
+                            {/* Interleaved Parts */}
+                            <div className="ml-10 space-y-4">
+                                {message.parts.map((part, index) => {
+                                    if (part.type === 'reasoning') {
+                                        return (
+                                            <Reasoning key={part.id} isStreaming={part.isStreaming} defaultOpen={false}>
+                                                <ReasoningTrigger />
+                                                <ReasoningContent>{part.content}</ReasoningContent>
+                                            </Reasoning>
+                                        );
+                                    }
+                                    if (part.type === 'tool') {
+                                        return (
+                                            <Tool key={part.id} defaultOpen={false}>
+                                                <ToolHeader
+                                                    type="tool-call"
+                                                    state={part.tool.state}
+                                                    className="bg-muted/40"
+                                                />
+                                                <ToolContent>
+                                                    <ToolInput input={part.tool.input} />
+                                                    {'result' in part.tool && !!part.tool.result && (
+                                                        <ToolOutput output={JSON.stringify(JSON.parse(part.tool.result as string), null, 2)} errorText={undefined} />
+                                                    )}
+                                                </ToolContent>
+                                            </Tool>
+                                        );
+                                    }
+                                    if (part.type === 'task') {
+                                        return (
+                                            <div key={part.id} className="space-y-2">
+                                                {part.tasks.map((task, tIndex) => (
+                                                    <Task key={tIndex} defaultOpen={true}>
+                                                        <TaskTrigger title={task.title} />
+                                                        <TaskContent>
+                                                            {task.items.map((item, iIndex) => (
+                                                                <TaskItem key={iIndex}>
+                                                                    {tIndex === 0 && iIndex === 0 ? <TaskItemFile>{item}</TaskItemFile> : item}
+                                                                </TaskItem>
+                                                            ))}
+                                                        </TaskContent>
+                                                    </Task>
                                                 ))}
-                                            </TaskContent>
-                                        </Task>
-                                    ))}
-                                </div>
-                            )}
-                            {/* Sources */}
-                            {message.sources && message.sources.length > 0 && (
-                                <div className="ml-10">
-                                    <Sources>
-                                        <SourcesTrigger count={message.sources.length} />
-                                        <SourcesContent>
-                                            {message.sources.map((source, index) => (
-                                                <Source key={index} href={source.url} title={source.title} />
-                                            ))}
-                                        </SourcesContent>
-                                    </Sources>
-                                </div>
-                            )}
+                                            </div>
+                                        );
+                                    }
+                                    if (part.type === 'source') {
+                                        return (
+                                            <Sources key={part.id}>
+                                                <SourcesTrigger count={part.sources.length} />
+                                                <SourcesContent>
+                                                    {part.sources.map((source, sIndex) => (
+                                                        <Source key={sIndex} href={source.url} title={source.title} />
+                                                    ))}
+                                                </SourcesContent>
+                                            </Sources>
+                                        );
+                                    }
+                                    return null; // Content is handled inside Message
+                                })}
+                            </div>
                         </div>
                     ))}
                 </ConversationContent>
